@@ -203,6 +203,7 @@ public struct AnthropicClient: Sendable {
                 if var state = blocks[index], let partial = delta.partialJSON {
                     state.args += partial
                     blocks[index] = state
+                    continuation.yield(.activity)
                 }
             default:
                 break

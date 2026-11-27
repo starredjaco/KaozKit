@@ -39,16 +39,22 @@ public struct OpenAICompatibleClient: Sendable {
     /// DeepSeek and GLM expect after a tool call, or — for Mistral, which
     /// refuses that field — as a `thinking` block of the content.
     public let reasoningAsBlocks: Bool
+    /// For a server that streams the reasoning as `reasoning` (Munito's
+    /// vLLM): it is kept and shown, and does not go back with the history.
+    /// Elsewhere that field only tells that the model is at work.
+    public let keepsReasoningField: Bool
 
     public init(
         baseURL: URL, apiKey: String, session: URLSession = .shared,
-        extraHeaders: [String: String] = [:], reasoningAsBlocks: Bool = false
+        extraHeaders: [String: String] = [:], reasoningAsBlocks: Bool = false,
+        keepsReasoningField: Bool = false
     ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
         self.session = session
         self.extraHeaders = extraHeaders
         self.reasoningAsBlocks = reasoningAsBlocks
+        self.keepsReasoningField = keepsReasoningField
     }
 
     // MARK: - Embeddings
@@ -248,7 +254,8 @@ public struct OpenAICompatibleClient: Sendable {
                     request.timeoutInterval = 60
                     request.httpBody = try Self.buildBody(
                         model: model, messages: messages, tools: tools, reasoningEffort: reasoningEffort,
-                        reasoningAsBlocks: reasoningAsBlocks, temperature: temperature)
+                        reasoningAsBlocks: reasoningAsBlocks, echoesReasoning: !keepsReasoningField,
+                        temperature: temperature)
 
                     // Client-side timing for the benchmark metrics. The
                     // server reports token counts but no durations, so we
@@ -321,6 +328,17 @@ public struct OpenAICompatibleClient: Sendable {
                         if !out.reasoning.isEmpty { continuation.yield(.reasoningDelta(out.reasoning)) }
                         if !out.text.isEmpty { continuation.yield(.textDelta(out.text)) }
                     }
+                    // What is received and not yet shown still counts: for
+                    // the clock, and for whoever watches for silence.
+                    var lastActivity: ContinuousClock.Instant?
+                    func noteActivity() {
+                        let now = clock.now
+                        if firstToken == nil { firstToken = now }
+                        lastToken = now
+                        if let last = lastActivity, last.duration(to: now) < .seconds(1) { return }
+                        lastActivity = now
+                        continuation.yield(.activity)
+                    }
                     func absorb(_ info: LineInfo) {
                         if let delta = info.textDelta {
                             if firstToken == nil { firstToken = clock.now }
@@ -331,7 +349,16 @@ public struct OpenAICompatibleClient: Sendable {
                             if firstToken == nil { firstToken = clock.now }
                             lastToken = clock.now
                             continuation.yield(.reasoningDelta(reasoning))
+                        } else if let reasoning = info.reasoningField {
+                            if keepsReasoningField {
+                                if firstToken == nil { firstToken = clock.now }
+                                lastToken = clock.now
+                                continuation.yield(.reasoningDelta(reasoning))
+                            } else {
+                                noteActivity()
+                            }
                         }
+                        if !info.toolCallDeltas.isEmpty { noteActivity() }
                         if let sources = info.sources, !sources.isEmpty {
                             continuation.yield(.sources(sources))
                         }
@@ -419,6 +446,8 @@ public struct OpenAICompatibleClient: Sendable {
         let usage: Usage?
         /// A TyKaoz server's sources, if this chunk carried them.
         var sources: [SourceReference]? = nil
+        /// The reasoning under vLLM's name, `reasoning`.
+        var reasoningField: String? = nil
 
         struct Usage: Equatable {
             let promptTokens: Int?
@@ -492,13 +521,15 @@ public struct OpenAICompatibleClient: Sendable {
                 )
             }
 
-            return LineInfo(
+            var info = LineInfo(
                 textDelta: textDelta,
                 toolCallDeltas: tcDeltas,
                 reasoningDelta: reasoningDelta,
                 done: choice.finishReason != nil,
                 usage: usage
             )
+            info.reasoningField = (delta?.reasoning?.isEmpty ?? true) ? nil : delta?.reasoning
+            return info
         } catch {
             throw OpenAICompatibleError.decoding(message: error.localizedDescription)
         }
@@ -791,6 +822,7 @@ public struct OpenAICompatibleClient: Sendable {
         tools: [ToolSpec],
         reasoningEffort: String? = nil,
         reasoningAsBlocks: Bool = false,
+        echoesReasoning: Bool = true,
         temperature: Double? = nil
     ) throws -> Data {
         var dict: [String: Any] = [
@@ -800,7 +832,8 @@ public struct OpenAICompatibleClient: Sendable {
             // we can report prompt/completion counts. Standard OpenAI option,
             // honoured by vLLM, NIM, LM Studio, llama.cpp and the cloud hosts.
             "stream_options": ["include_usage": true],
-            "messages": try messagesToDicts(messages, reasoningAsBlocks: reasoningAsBlocks)
+            "messages": try messagesToDicts(
+                messages, reasoningAsBlocks: reasoningAsBlocks, echoesReasoning: echoesReasoning)
         ]
         if let reasoningEffort {
             dict["reasoning_effort"] = reasoningEffort
@@ -830,7 +863,9 @@ public struct OpenAICompatibleClient: Sendable {
     /// shape. Consecutive `.assistant` + `.toolCall` entries merge into a
     /// single assistant message with a `tool_calls` array; `.toolResult`
     /// entries become role="tool" messages with `tool_call_id`.
-    static func messagesToDicts(_ messages: [ChatMessage], reasoningAsBlocks: Bool = false) throws -> [[String: Any]] {
+    static func messagesToDicts(
+        _ messages: [ChatMessage], reasoningAsBlocks: Bool = false, echoesReasoning: Bool = true
+    ) throws -> [[String: Any]] {
         var out: [[String: Any]] = []
         var i = 0
         while i < messages.count {
@@ -858,7 +893,7 @@ public struct OpenAICompatibleClient: Sendable {
                     "role": "assistant",
                     "content": msg.content
                 ]
-                if let reasoning = msg.reasoningContent, !reasoning.isEmpty {
+                if echoesReasoning, let reasoning = msg.reasoningContent, !reasoning.isEmpty {
                     if reasoningAsBlocks {
                         var blocks: [[String: Any]] = [[
                             "type": "thinking",

@@ -10,6 +10,9 @@ public struct MunitoProvider: LLMProvider {
 
     public let apiKey: String
     public let model: String
+    /// Sent as `reasoning_effort`; nil leaves the model's default. « none »
+    /// turns reasoning off, or to its lowest for GLM, which always reasons.
+    public let reasoningEffort: String?
 
     private let client: OpenAICompatibleClient
 
@@ -18,11 +21,13 @@ public struct MunitoProvider: LLMProvider {
 
     public init(
         apiKey: String, model: String = MunitoProvider.defaultModel,
-        baseURL: URL = MunitoProvider.baseURL, session: URLSession = .shared
+        baseURL: URL = MunitoProvider.baseURL, reasoningEffort: String? = nil, session: URLSession = .shared
     ) {
         self.apiKey = apiKey
         self.model = model
-        self.client = OpenAICompatibleClient(baseURL: baseURL, apiKey: apiKey, session: session)
+        self.reasoningEffort = reasoningEffort
+        self.client = OpenAICompatibleClient(
+            baseURL: baseURL, apiKey: apiKey, session: session, keepsReasoningField: true)
     }
 
     public func availability() async -> ProviderAvailability {
@@ -49,6 +54,7 @@ public struct MunitoProvider: LLMProvider {
     public func chat(
         messages: [ChatMessage], tools: [ToolSpec], temperature: Double?
     ) -> AsyncThrowingStream<StreamEvent, Error> {
-        client.chat(model: model, messages: messages, tools: tools, temperature: temperature)
+        client.chat(
+            model: model, messages: messages, tools: tools, reasoningEffort: reasoningEffort, temperature: temperature)
     }
 }

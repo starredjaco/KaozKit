@@ -10,11 +10,16 @@ public struct OpenAICompatibleChunk: Decodable {
             public let content: String?
             public let toolCalls: [ToolCallDelta]?
             public let reasoningContent: String?
+            /// vLLM's other name for the reasoning, read apart from
+            /// `reasoning_content`: a server that names it so does not
+            /// necessarily take it back under the first name.
+            public let reasoning: String?
 
             enum CodingKeys: String, CodingKey {
                 case content
                 case toolCalls = "tool_calls"
                 case reasoningContent = "reasoning_content"
+                case reasoning
             }
 
             /// `content` is a string, or — for Mistral's reasoning models — a
@@ -35,6 +40,8 @@ public struct OpenAICompatibleChunk: Decodable {
                     content = nil
                 }
                 reasoningContent = reasoning
+                // Lenient: a server may put an object there.
+                self.reasoning = try? c.decodeIfPresent(String.self, forKey: .reasoning)
             }
         }
 

@@ -71,6 +71,11 @@ public enum StreamEvent: Sendable, Hashable {
     /// small machine, minutes that would otherwise read as a hung app. Any
     /// other event means the reading is over.
     case prefill(processed: Int, total: Int)
+    /// The model is producing something this stream does not carry piece by
+    /// piece: the arguments of a tool call, emitted whole once assembled, or
+    /// a reasoning that is not kept. Carries nothing; it only tells a model
+    /// at work from a silent one. At most one a second.
+    case activity
     /// What an answer rests on, as a TyKaoz server names it: the wiki pages
     /// it read there, and the document each was written from. The pages
     /// stay on the server; the client can only show their names.
